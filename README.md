@@ -4,6 +4,12 @@ Shed the folders that grow back.
 
 Molt is a Windows app that finds the folders your dev projects can regenerate, such as `node_modules`, `.next` and Rust `target`, shows how much space they take, and deletes the ones you pick.
 
+## Download
+
+Get `Molt.exe` from the [latest release](https://github.com/Aaryan6/molt/releases/latest). It's a portable app with no installer. It runs on Windows 10 and 11 and uses WebView2, which Windows 11 already includes. The exe isn't code-signed, so SmartScreen may warn you the first time: click **More info**, then **Run anyway**.
+
+The same release has `molt-cli.exe`, the command-line version.
+
 ## What it finds
 
 | Folder | Found when | Brought back by |
@@ -37,7 +43,7 @@ The app is built to `target/release/molt-app.exe`.
 ## CLI
 
 ```sh
-cargo build --release -p molt
+cargo build --release -p molt   # builds target/release/molt.exe
 molt scan D:\code --min-mb 100
 molt clean D:\code --older-than-days 30          # dry run
 molt clean D:\code --older-than-days 30 --yes    # delete
@@ -50,3 +56,7 @@ molt clean D:\code --older-than-days 30 --yes    # delete
 - `src-tauri`: the Tauri 2 desktop app
 - `src`: the React frontend
 - `design/molt-ui.html`: the UI mockup
+
+## License
+
+MIT. See [LICENSE](LICENSE).
