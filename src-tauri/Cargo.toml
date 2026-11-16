@@ -1,0 +1,17 @@
+[package]
+name = "molt-app"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+molt-core = { path = "../crates/core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+
+[features]
+# Embeds the built frontend instead of loading the dev server URL.
+custom-protocol = ["tauri/custom-protocol"]
