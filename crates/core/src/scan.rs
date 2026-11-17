@@ -36,6 +36,11 @@ where
     let on_found = &on_found;
     rayon::scope(|s| {
         for root in roots {
+            // Callers should check `protected_area` first and explain; this
+            // keeps a protected root from being walked regardless.
+            if rules::protected_area(root).is_some() {
+                continue;
+            }
             s.spawn(move |s| walk(s, root.clone(), on_found));
         }
     });
@@ -58,17 +63,25 @@ where
         names.push(name);
     }
 
+    if rules::is_package_store(&names) {
+        return;
+    }
     if rules::is_venv(&names) {
         spawn_size(s, dir, Kind::PythonVenv, on_found);
         return;
     }
 
     for (name, path) in subdirs {
-        if rules::is_skipped_dir(&name) {
+        if rules::is_skipped_dir(&name) || rules::is_package_manager_dir(&dir, &name) {
             continue;
         }
         if let Some(kind) = rules::match_by_name(&name, &dir, &names) {
             spawn_size(s, path, kind, on_found);
+        } else if rules::is_hidden_dir(&name) {
+            // `.venv` is the one hidden folder worth taking.
+            if rules::is_venv_dir(&path) {
+                spawn_size(s, path, Kind::PythonVenv, on_found);
+            }
         } else {
             s.spawn(move |s| walk(s, path, on_found));
         }

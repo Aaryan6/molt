@@ -40,6 +40,54 @@ pub fn delete_candidate(path: &Path) -> Result<(), DeleteError> {
     }
 }
 
+/// Move a candidate folder to the Recycle Bin instead of deleting it. The
+/// space is only freed once the bin is emptied. Same safety checks as
+/// [`delete_candidate`].
+pub fn recycle_candidate(path: &Path) -> Result<(), DeleteError> {
+    if is_link(path) || !is_target(path) {
+        return Err(DeleteError::NotATarget);
+    }
+    recycle(path).map_err(DeleteError::Io)
+}
+
+#[cfg(windows)]
+fn recycle(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW,
+    };
+
+    // The shell wants a full path with backslashes, ending in two NULs.
+    let full = std::path::absolute(path)?;
+    let mut from: Vec<u16> = full.as_os_str().encode_wide().collect();
+    from.extend([0, 0]);
+
+    // SAFETY: an all-zero SHFILEOPSTRUCTW is valid (null handles and
+    // pointers); the fields the call reads are set below and `from` outlives it.
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    // FOF_WANTNUKEWARNING makes Windows ask before it permanently deletes a
+    // folder that is too big for the Recycle Bin, instead of doing it silently.
+    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_WANTNUKEWARNING) as u16;
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 {
+        return Err(io::Error::other(format!(
+            "couldn't move to the Recycle Bin (shell error {code:#x})"
+        )));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err(io::Error::other("cancelled"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn recycle(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "Recycle Bin is only supported on Windows"))
+}
+
 fn clear_readonly(dir: &Path) {
     let Ok(read) = fs::read_dir(dir) else { return };
     for entry in read.flatten() {
@@ -68,6 +116,9 @@ fn list_names(dir: &Path) -> Vec<String> {
 }
 
 fn is_target(path: &Path) -> bool {
+    if rules::protected_area(path).is_some() {
+        return false;
+    }
     let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return false;
     };

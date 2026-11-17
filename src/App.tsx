@@ -2,19 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { deletePaths, diskInfo, scan, type Candidate, type DiskSpace } from "./api";
 import FolderList, { type Sort } from "./FolderList";
-import { formatBytes, GROUPS, isIdle, toItem, totalSize, type GroupId, type Item } from "./model";
+import { ANY_TIME, formatBytes, GROUPS, IDLE_DAYS, isIdle, matchesEdited, toItem, totalSize, type EditedFilter, type GroupId, type Item } from "./model";
 import Overview from "./Overview";
 
 const ROOT_KEY = "molt.root";
+const RECYCLE_KEY = "molt.recycle";
 
 export default function App() {
   const [root, setRoot] = useState<string | null>(() => localStorage.getItem(ROOT_KEY));
   const [items, setItems] = useState<Item[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [disk, setDisk] = useState<DiskSpace | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<GroupId | "all">("all");
   const [sort, setSort] = useState<Sort>("size");
+  const [edited, setEdited] = useState<EditedFilter>(ANY_TIME);
+  // Recycle Bin is the default; the choice is remembered.
+  const [recycle, setRecycle] = useState(() => localStorage.getItem(RECYCLE_KEY) !== "0");
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -30,6 +35,7 @@ export default function App() {
     async (dir: string) => {
       setItems([]);
       setSelected(new Set());
+      setScanError(null);
       setScanning(true);
       diskInfo(dir).then(setDisk).catch(() => setDisk(null));
       // Batch streamed results so a big scan does not re-render per folder.
@@ -44,7 +50,7 @@ export default function App() {
       try {
         await scan([dir], (c) => buffer.push(c));
       } catch (e) {
-        notify(`Scan failed: ${e}`);
+        setScanError(String(e));
       } finally {
         clearInterval(timer);
         flush();
@@ -71,9 +77,9 @@ export default function App() {
   const shown = useMemo(() => {
     const group = GROUPS.find((g) => g.id === tab);
     return items
-      .filter((i) => !group || i.group === group)
+      .filter((i) => (!group || i.group === group) && matchesEdited(i, edited))
       .sort((a, b) => (sort === "size" ? b.size - a.size : (b.age ?? -1) - (a.age ?? -1)));
-  }, [items, tab, sort]);
+  }, [items, tab, sort, edited]);
 
   const chosen = items.filter((i) => selected.has(i.path));
 
@@ -97,23 +103,35 @@ export default function App() {
   function selectIdle() {
     setSelected((prev) => new Set([...prev, ...items.filter(isIdle).map((i) => i.path)]));
     setTab("all");
+    setEdited({ kind: "older", days: IDLE_DAYS });
     setSort("age");
+  }
+
+  function chooseRecycle(on: boolean) {
+    setRecycle(on);
+    localStorage.setItem(RECYCLE_KEY, on ? "1" : "0");
   }
 
   async function confirmDelete() {
     setDeleting(true);
     try {
-      const results = await deletePaths(chosen.map((i) => i.path));
+      const results = await deletePaths(
+        chosen.map((i) => i.path),
+        recycle,
+      );
       const done = new Set(results.filter((r) => !r.error).map((r) => r.path));
       const failed = results.filter((r) => r.error);
       const freed = totalSize(chosen.filter((i) => done.has(i.path)));
       setItems((prev) => prev.filter((i) => !done.has(i.path)));
       setSelected(new Set(failed.map((r) => r.path)));
       if (root) diskInfo(root).then(setDisk).catch(() => {});
+      const doneMsg = recycle
+        ? `Moved ${formatBytes(freed)} to the Recycle Bin`
+        : `Freed ${formatBytes(freed)}`;
       notify(
         failed.length
-          ? `Freed ${formatBytes(freed)}. ${failed.length} couldn't be deleted: ${failed[0].error}`
-          : `Freed ${formatBytes(freed)}`,
+          ? `${doneMsg}. ${failed.length} couldn't be ${recycle ? "moved" : "deleted"}: ${failed[0].error}`
+          : doneMsg,
       );
     } catch (e) {
       notify(`Delete failed: ${e}`);
@@ -145,7 +163,7 @@ export default function App() {
 
       <header className="top">
         <div className="brand">
-          <span className="mark" />
+          <LogoMark />
           Molt
         </div>
         <button className="chip-btn" onClick={pickFolder} title="Change folder">
@@ -166,11 +184,14 @@ export default function App() {
         shown={shown}
         tab={tab}
         sort={sort}
+        edited={edited}
         selected={selected}
         scanning={scanning}
+        scanError={scanError}
         hasRoot={root !== null}
         onTab={setTab}
         onSort={setSort}
+        onEdited={setEdited}
         onToggle={toggle}
         onToggleAll={toggleAll}
         onDelete={() => setConfirming(true)}
@@ -184,20 +205,27 @@ export default function App() {
               Delete {chosen.length} folder{chosen.length === 1 ? "" : "s"}?
             </h2>
             <p>
-              They're removed permanently. Your code stays untouched, and you can bring them back with{" "}
-              {recreate.slice(0, 2).join(" or ")}
+              Your code stays untouched, and you can bring them back with {recreate.slice(0, 2).join(" or ")}
               {recreate.length > 2 ? " and the like" : ""}.
             </p>
+            <div className="modes" role="radiogroup" aria-label="How to delete">
+              <button role="radio" aria-checked={recycle} className={recycle ? "on" : ""} onClick={() => chooseRecycle(true)} disabled={deleting}>
+                Recycle Bin
+              </button>
+              <button role="radio" aria-checked={!recycle} className={recycle ? "" : "on"} onClick={() => chooseRecycle(false)} disabled={deleting}>
+                Delete permanently
+              </button>
+            </div>
             <div className="free">
               <b className="num">{formatBytes(totalSize(chosen))}</b>
-              <span>will be freed</span>
+              <span>{recycle ? "freed when you empty the Recycle Bin" : "freed right away, no undo"}</span>
             </div>
             <div className="actions">
               <button className="btn" disabled={deleting} onClick={() => setConfirming(false)}>
                 Cancel
               </button>
-              <button className="btn danger" disabled={deleting} onClick={confirmDelete} autoFocus>
-                {deleting ? "Deleting…" : "Delete permanently"}
+              <button className={recycle ? "btn primary" : "btn danger"} disabled={deleting} onClick={confirmDelete} autoFocus>
+                {deleting ? (recycle ? "Moving…" : "Deleting…") : recycle ? "Move to Recycle Bin" : "Delete permanently"}
               </button>
             </div>
           </div>
@@ -242,3 +270,13 @@ const CheckIcon = () => (
     <path d="m5 12 5 5L20 7" />
   </svg>
 );
+
+/** The app icon: a light ring on a dark tile, same proportions as app-icon.png. */
+function LogoMark() {
+  return (
+    <svg className="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+      <rect width="24" height="24" rx="6" fill="#18181b" />
+      <circle cx="12" cy="12" r="5.25" fill="none" stroke="#f4f4f5" strokeWidth="4.5" />
+    </svg>
+  );
+}

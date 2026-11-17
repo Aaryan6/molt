@@ -30,7 +30,8 @@ export function scan(roots: string[], onFound: (c: Candidate) => void) {
   return invoke<void>("scan", { roots, onFound: channel });
 }
 
-export const deletePaths = (paths: string[]) =>
-  invoke<DeleteResult[]>("delete_paths", { paths });
+/** Delete folders permanently, or move them to the Recycle Bin. */
+export const deletePaths = (paths: string[], recycle: boolean) =>
+  invoke<DeleteResult[]>("delete_paths", { paths, recycle });
 
 export const diskInfo = (path: string) => invoke<DiskSpace | null>("disk_info", { path });

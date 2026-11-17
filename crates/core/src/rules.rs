@@ -52,6 +52,67 @@ pub fn is_skipped_dir(name: &str) -> bool {
     SKIPPED.iter().any(|s| name.eq_ignore_ascii_case(s))
 }
 
+/// Package-manager folders that look like projects but are shared by all of
+/// them: pnpm's store (`.pnpm-store`, `pnpm\store`) and global installs
+/// (`pnpm\global`, `Yarn\Data\global`). pnpm 11's store keeps every package
+/// under `links\` with its own `package.json` and `node_modules`, so without
+/// this each one would show up as a project.
+pub fn is_package_manager_dir(parent: &Path, name: &str) -> bool {
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let parent_name = file_name(parent);
+    let grandparent_name = parent.parent().map(file_name).unwrap_or_default();
+    is(name, ".pnpm-store")
+        || (is(&parent_name, "pnpm") && (is(name, "store") || is(name, "global")))
+        || (is(name, "global") && is(&parent_name, "Data") && is(&grandparent_name, "Yarn"))
+}
+
+/// A pnpm store version folder (`v3`, `v10`, `v11`, ...) wherever the store
+/// lives: it holds `files\` next to `index\`, `index.db` or `links\`.
+pub fn is_package_store(entries: &[String]) -> bool {
+    let has = |f: &str| entries.iter().any(|e| e.eq_ignore_ascii_case(f));
+    has("files") && (has("index") || has("index.db") || has("links"))
+}
+
+/// When `path` is inside a place that holds installed apps and tools rather
+/// than projects, the name of that folder. These are AppData, Program Files
+/// and the like, package-manager stores and global installs, and editor
+/// extension folders (`.vscode\extensions`). Molt neither scans from nor
+/// deletes inside them.
+pub fn protected_area(path: &Path) -> Option<String> {
+    path.ancestors().find_map(|dir| {
+        let name = file_name(dir);
+        let parent = dir.parent();
+        let store_version = dir.join("files").is_dir()
+            && (dir.join("index").is_dir() || dir.join("index.db").is_file() || dir.join("links").is_dir());
+        let parent_name = parent.map(file_name).unwrap_or_default();
+        if store_version {
+            return Some("the pnpm store".to_string());
+        }
+        if parent.is_some_and(|p| is_package_manager_dir(p, &name)) {
+            return Some(if name.eq_ignore_ascii_case("global") {
+                let tool = if parent_name.eq_ignore_ascii_case("pnpm") { "pnpm" } else { "Yarn" };
+                format!("{tool}'s global packages")
+            } else {
+                "the pnpm store".to_string()
+            });
+        }
+        if name.eq_ignore_ascii_case("extensions") && parent_name.starts_with('.') {
+            return Some(format!("the {parent_name} extensions folder"));
+        }
+        is_skipped_dir(&name).then_some(name)
+    })
+}
+
+/// Hidden dot-folders hold tool and editor state (`.vscode`, `.cache`,
+/// `.cursor`), not projects, so the walk does not enter them.
+pub fn is_hidden_dir(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 /// Folder names that are always regenerated, used to judge project activity.
 pub fn is_generated_name(name: &str) -> bool {
     matches!(
@@ -111,4 +172,53 @@ pub fn is_venv_dir(dir: &Path) -> bool {
 /// A directory is a Python venv when it contains `pyvenv.cfg`.
 pub fn is_venv(entries: &[String]) -> bool {
     entries.iter().any(|e| e.eq_ignore_ascii_case("pyvenv.cfg"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("molt-rules-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pnpm_store_versions_are_stores() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_package_store(&names(&["files", "index"])));
+        assert!(is_package_store(&names(&["files", "index.db", "links", "projects"])));
+        assert!(!is_package_store(&names(&["files", "src", "package.json"])));
+    }
+
+    #[test]
+    fn package_manager_dirs_by_name() {
+        assert!(is_package_manager_dir(Path::new(r"F:\"), ".pnpm-store"));
+        assert!(is_package_manager_dir(Path::new(r"C:\Users\me\AppData\Local\pnpm"), "store"));
+        assert!(is_package_manager_dir(Path::new(r"C:\Users\me\AppData\Local\pnpm"), "global"));
+        assert!(is_package_manager_dir(Path::new(r"C:\Users\me\AppData\Local\Yarn\Data"), "global"));
+        assert!(!is_package_manager_dir(Path::new(r"D:\code\app"), "global"));
+    }
+
+    #[test]
+    fn protected_areas() {
+        assert_eq!(protected_area(Path::new(r"C:\Users\me\AppData\Local\x\node_modules")).as_deref(), Some("AppData"));
+        assert_eq!(
+            protected_area(Path::new(r"C:\Users\me\.vscode\extensions\ext-1.0\node_modules")).as_deref(),
+            Some("the .vscode extensions folder")
+        );
+        assert_eq!(protected_area(Path::new(r"D:\code\app\node_modules")), None);
+
+        // A pnpm 11 store at a custom location, found by its layout.
+        let store = tmp("store").join("v11");
+        let pkg = store.join(r"links\left-pad\1.0.0\abc\node_modules\left-pad");
+        fs::create_dir_all(store.join("files")).unwrap();
+        fs::create_dir_all(pkg.join("node_modules")).unwrap();
+        fs::write(store.join("index.db"), b"").unwrap();
+        assert_eq!(protected_area(&pkg.join("node_modules")).as_deref(), Some("the pnpm store"));
+        let _ = fs::remove_dir_all(store.parent().unwrap());
+    }
 }

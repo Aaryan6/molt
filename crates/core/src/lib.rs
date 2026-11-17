@@ -5,7 +5,7 @@ mod disk;
 mod rules;
 mod scan;
 
-pub use clean::{delete_candidate, DeleteError};
+pub use clean::{delete_candidate, recycle_candidate, DeleteError};
 pub use disk::{disk_space, DiskSpace};
-pub use rules::Kind;
+pub use rules::{protected_area, Kind};
 pub use scan::{scan, Candidate};

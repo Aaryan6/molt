@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use molt_core::{delete_candidate, scan, Candidate};
+use molt_core::{delete_candidate, recycle_candidate, scan, Candidate};
 
 #[derive(Parser)]
 #[command(name = "molt", about = "Find and clean regenerable dev folders")]
@@ -31,12 +31,20 @@ enum Cmd {
         /// Only folders whose newest file is at least this many days old.
         #[arg(long, default_value_t = 0)]
         older_than_days: u64,
+        /// Move folders to the Recycle Bin instead of deleting them.
+        #[arg(long)]
+        recycle: bool,
         #[arg(long)]
         yes: bool,
     },
 }
 
 fn collect(roots: &[PathBuf], min_mb: u64) -> Vec<Candidate> {
+    for root in roots {
+        if let Some(area) = molt_core::protected_area(root) {
+            eprintln!("skipping {}: it is inside {area}, which holds installed apps and tools, not projects", root.display());
+        }
+    }
     let found = Mutex::new(Vec::new());
     scan(roots, |c| {
         if c.size >= min_mb * 1024 * 1024 {
@@ -92,7 +100,7 @@ fn main() {
                 human(reclaim)
             );
         }
-        Cmd::Clean { roots, min_mb, older_than_days, yes } => {
+        Cmd::Clean { roots, min_mb, older_than_days, recycle, yes } => {
             let items: Vec<_> = collect(&roots, min_mb)
                 .into_iter()
                 .filter(|c| age_days(c).is_some_and(|d| d >= older_than_days))
@@ -108,15 +116,20 @@ fn main() {
             }
             let mut freed = 0;
             for c in &items {
-                match delete_candidate(&c.path) {
+                let result = if recycle { recycle_candidate(&c.path) } else { delete_candidate(&c.path) };
+                match result {
                     Ok(()) => {
                         freed += c.reclaimable();
-                        println!("deleted {}", c.path.display());
+                        println!("{} {}", if recycle { "recycled" } else { "deleted " }, c.path.display());
                     }
-                    Err(e) => eprintln!("failed  {}: {e}", c.path.display()),
+                    Err(e) => eprintln!("failed   {}: {e}", c.path.display()),
                 }
             }
-            println!("\nFreed {}", human(freed));
+            if recycle {
+                println!("\nMoved {} to the Recycle Bin. Empty it to free the space.", human(freed));
+            } else {
+                println!("\nFreed {}", human(freed));
+            }
         }
     }
 }

@@ -22,9 +22,11 @@ The same release has `molt-cli.exe`, the command-line version.
 | Python venvs | the folder has a `pyvenv.cfg` | `pip install` |
 | `__pycache__` | always | running the code |
 
-Molt skips symlinks, junctions, `.git`, and system folders such as `AppData`, `Program Files` and `Windows`.
+Molt only looks at your own projects. It skips symlinks, junctions, hidden dot-folders such as `.vscode`, `.cache` and `.cursor` (but still finds a project's `.next` or `.venv`), and system folders such as `AppData`, `Program Files` and `Windows`. It also skips pnpm's store and global packages, wherever they live, and Yarn's global packages. If you pick a folder inside any of these, Molt tells you instead of listing the apps and tools installed there, and it won't delete anything inside them.
 
-Deletion is permanent and only happens after you confirm it. Before deleting a folder, Molt checks the rules again.
+Nothing is deleted until you confirm. In the confirm dialog you choose whether folders go to the Recycle Bin, which is the default and can be undone, or are deleted permanently. Recycled folders still take up space until you empty the Recycle Bin. Before deleting or recycling a folder, Molt checks the rules again.
+
+Use the **Edited** filter to see only projects you haven't touched in a week, a month, 3 months, 6 months or a year. To clear out everything older than a month, pick "Older than 1 month", tick the header checkbox and press Delete.
 
 For pnpm projects, the size shown is the full folder size. Most of those files are hardlinks to the pnpm store, so deleting frees less space until you run `pnpm store prune`.
 
@@ -47,6 +49,7 @@ cargo build --release -p molt   # builds target/release/molt.exe
 molt scan D:\code --min-mb 100
 molt clean D:\code --older-than-days 30          # dry run
 molt clean D:\code --older-than-days 30 --yes    # delete
+molt clean D:\code --older-than-days 30 --yes --recycle   # to the Recycle Bin
 ```
 
 ## Layout

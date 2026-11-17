@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { formatAge, formatBytes, GROUPS, isIdle, totalSize, type GroupId, type Item } from "./model";
+import EditedPicker from "./EditedPicker";
+import { ANY_TIME, formatAge, formatBytes, GROUPS, isIdle, matchesEdited, totalSize, type EditedFilter, type GroupId, type Item } from "./model";
 
 export type Sort = "size" | "age";
 
@@ -8,11 +9,15 @@ type Props = {
   shown: Item[];
   tab: GroupId | "all";
   sort: Sort;
+  /** Filter on when each project was last edited. */
+  edited: EditedFilter;
   selected: Set<string>;
   scanning: boolean;
+  scanError: string | null;
   hasRoot: boolean;
   onTab: (tab: GroupId | "all") => void;
   onSort: (sort: Sort) => void;
+  onEdited: (f: EditedFilter) => void;
   onToggle: (path: string) => void;
   onToggleAll: () => void;
   onDelete: () => void;
@@ -20,19 +25,22 @@ type Props = {
 };
 
 export default function FolderList(p: Props) {
+  // Tab counts follow the age filter, so they match what each tab shows.
+  const pool = p.items.filter((i) => matchesEdited(i, p.edited));
   const tabs = [
-    { id: "all" as const, label: "All", count: p.items.length, color: undefined },
+    { id: "all" as const, label: "All", count: pool.length, color: undefined },
     ...GROUPS.map((g) => ({
       id: g.id,
       label: g.label,
-      count: p.items.filter((i) => i.group === g).length,
+      count: pool.filter((i) => i.group === g).length,
       color: g.color,
     })),
-  ].filter((t) => t.id === "all" || t.count > 0);
+  ].filter((t) => t.id === "all" || t.count > 0 || t.id === p.tab);
 
   const max = Math.max(1, ...p.items.map((i) => i.size));
   const nSel = p.shown.filter((i) => p.selected.has(i.path)).length;
   const chosen = p.items.filter((i) => p.selected.has(i.path));
+  const hiddenSel = chosen.length - nSel;
 
   const allRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -51,12 +59,15 @@ export default function FolderList(p: Props) {
             </button>
           ))}
         </div>
+        <div className="tools">
+        <EditedPicker items={p.items} value={p.edited} onChange={p.onEdited} />
         <div className="sort">
           {(["size", "age"] as const).map((s) => (
             <button key={s} className={p.sort === s ? "on" : ""} onClick={() => p.onSort(s)}>
               {s === "size" ? "Largest" : "Oldest"}
             </button>
           ))}
+        </div>
         </div>
       </div>
 
@@ -105,11 +116,31 @@ export default function FolderList(p: Props) {
           <div className="empty">
             {p.scanning ? (
               "Looking for folders…"
+            ) : p.scanError ? (
+              <>
+                <div className="err">{p.scanError}</div>
+                <button className="btn" onClick={p.onPickFolder}>
+                  Choose another folder
+                </button>
+              </>
             ) : !p.hasRoot ? (
               <>
                 <div>Pick the folder where you keep your projects.</div>
                 <button className="btn" onClick={p.onPickFolder}>
                   Choose folder
+                </button>
+              </>
+            ) : p.items.length > 0 ? (
+              <>
+                <div>No folders match these filters.</div>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    p.onEdited(ANY_TIME);
+                    p.onTab("all");
+                  }}
+                >
+                  Show everything
                 </button>
               </>
             ) : (
@@ -124,6 +155,7 @@ export default function FolderList(p: Props) {
           {chosen.length ? (
             <>
               <b>{chosen.length}</b> selected · <b className="num">{formatBytes(totalSize(chosen))}</b> to free
+              {hiddenSel > 0 && <span className="hidden-note"> · {hiddenSel} hidden by filters</span>}
             </>
           ) : (
             "Pick folders to free up space"
