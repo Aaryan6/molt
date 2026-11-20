@@ -1,12 +1,27 @@
 import { useEffect, useRef } from "react";
 import EditedPicker from "./EditedPicker";
-import { ANY_TIME, formatAge, formatBytes, GROUPS, isIdle, matchesEdited, totalSize, type EditedFilter, type GroupId, type Item } from "./model";
+import {
+  ANY_TIME,
+  formatAge,
+  formatBytes,
+  GROUPS,
+  isIdle,
+  matchesEdited,
+  splitDisplayPath,
+  totalFolders,
+  totalReclaimable,
+  totalShared,
+  type EditedFilter,
+  type GroupId,
+  type Item,
+} from "./model";
 
 export type Sort = "size" | "age";
 
 type Props = {
   items: Item[];
   shown: Item[];
+  root: string | null;
   tab: GroupId | "all";
   sort: Sort;
   /** Filter on when each project was last edited. */
@@ -18,7 +33,7 @@ type Props = {
   onTab: (tab: GroupId | "all") => void;
   onSort: (sort: Sort) => void;
   onEdited: (f: EditedFilter) => void;
-  onToggle: (path: string) => void;
+  onToggle: (id: string) => void;
   onToggleAll: () => void;
   onDelete: () => void;
   onPickFolder: () => void;
@@ -37,10 +52,13 @@ export default function FolderList(p: Props) {
     })),
   ].filter((t) => t.id === "all" || t.count > 0 || t.id === p.tab);
 
-  const max = Math.max(1, ...p.items.map((i) => i.size));
-  const nSel = p.shown.filter((i) => p.selected.has(i.path)).length;
-  const chosen = p.items.filter((i) => p.selected.has(i.path));
+  const max = Math.max(1, ...p.items.map((i) => i.reclaimable));
+  const nSel = p.shown.filter((i) => p.selected.has(i.id)).length;
+  const chosen = p.items.filter((i) => p.selected.has(i.id));
   const hiddenSel = chosen.length - nSel;
+  const chosenFolders = totalFolders(chosen);
+  const chosenReclaimable = totalReclaimable(chosen);
+  const chosenShared = totalShared(chosen);
 
   const allRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -88,27 +106,39 @@ export default function FolderList(p: Props) {
 
       <div className="rows">
         {p.shown.map((i) => {
-          const on = p.selected.has(i.path);
+          const on = p.selected.has(i.id);
+          const { prefix, leaf } = splitDisplayPath(i.path, p.root);
           return (
-            <div key={i.path} className={on ? "row sel" : "row"} onClick={() => p.onToggle(i.path)}>
+            <div key={i.id} className={on ? "row sel" : "row"} onClick={() => p.onToggle(i.id)}>
               <input type="checkbox" tabIndex={-1} checked={on} readOnly />
               <div className="name">
                 <b>{i.project}</b>
-                <span className="mono" title={i.path}>
-                  {i.path}
+                <span className="path-line mono" title={i.path}>
+                  {prefix && <span className="dir">{prefix}</span>}
+                  <span className="leaf">{leaf}</span>
                 </span>
               </div>
               <div>
-                <span className="kind">
+                <span className="kind" title={i.paths.length > 1 ? `${i.paths.length} __pycache__ folders` : i.folder}>
                   <i className="dot" style={{ background: i.group.color }} />
                   {i.folder}
                 </span>
               </div>
               <div className="meter">
-                <i style={{ width: `${(i.size / max) * 100}%`, background: i.group.color }} />
+                <i style={{ width: `${(i.reclaimable / max) * 100}%`, background: i.group.color }} />
               </div>
               <span className={isIdle(i) ? "age old" : "age"}>{formatAge(i.age)}</span>
-              <span className="size num r">{formatBytes(i.size)}</span>
+              <span
+                className="size num r"
+                title={
+                  i.shared > 0
+                    ? `${formatBytes(i.size)} total (${formatBytes(i.shared)} hardlinked in pnpm store — run pnpm store prune after deleting to free it)`
+                    : undefined
+                }
+              >
+                <b>{formatBytes(i.reclaimable)}</b>
+                {i.shared > 0 && <small>{formatBytes(i.size)} pnpm</small>}
+              </span>
             </div>
           );
         })}
@@ -154,7 +184,9 @@ export default function FolderList(p: Props) {
         <span className="info">
           {chosen.length ? (
             <>
-              <b>{chosen.length}</b> selected · <b className="num">{formatBytes(totalSize(chosen))}</b> to free
+              <b>{chosenFolders}</b> {chosenFolders === 1 ? "folder" : "folders"} selected ·{" "}
+              <b className="num">{formatBytes(chosenReclaimable)}</b> to free
+              {chosenShared > 0 && <span className="hidden-note"> · +{formatBytes(chosenShared)} pnpm</span>}
               {hiddenSel > 0 && <span className="hidden-note"> · {hiddenSel} hidden by filters</span>}
             </>
           ) : (

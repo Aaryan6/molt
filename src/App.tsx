@@ -2,7 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { deletePaths, diskInfo, scan, type Candidate, type DiskSpace } from "./api";
 import FolderList, { type Sort } from "./FolderList";
-import { ANY_TIME, formatBytes, GROUPS, IDLE_DAYS, isIdle, matchesEdited, toItem, totalSize, type EditedFilter, type GroupId, type Item } from "./model";
+import {
+  ANY_TIME,
+  buildItems,
+  formatBytes,
+  GROUPS,
+  IDLE_DAYS,
+  isIdle,
+  matchesEdited,
+  totalFolders,
+  totalReclaimable,
+  totalShared,
+  type EditedFilter,
+  type GroupId,
+} from "./model";
 import Overview from "./Overview";
 
 const ROOT_KEY = "molt.root";
@@ -10,7 +23,7 @@ const RECYCLE_KEY = "molt.recycle";
 
 export default function App() {
   const [root, setRoot] = useState<string | null>(() => localStorage.getItem(ROOT_KEY));
-  const [items, setItems] = useState<Item[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [disk, setDisk] = useState<DiskSpace | null>(null);
@@ -31,9 +44,11 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 3500);
   }, []);
 
+  const items = useMemo(() => buildItems(candidates), [candidates]);
+
   const runScan = useCallback(
     async (dir: string) => {
-      setItems([]);
+      setCandidates([]);
       setSelected(new Set());
       setScanError(null);
       setScanning(true);
@@ -42,9 +57,9 @@ export default function App() {
       let buffer: Candidate[] = [];
       const flush = () => {
         if (buffer.length === 0) return;
-        const batch = buffer.map(toItem);
+        const batch = buffer;
         buffer = [];
-        setItems((prev) => [...prev, ...batch]);
+        setCandidates((prev) => [...prev, ...batch]);
       };
       const timer = window.setInterval(flush, 120);
       try {
@@ -57,7 +72,7 @@ export default function App() {
         setScanning(false);
       }
     },
-    [notify],
+    [],
   );
 
   useEffect(() => {
@@ -78,30 +93,37 @@ export default function App() {
     const group = GROUPS.find((g) => g.id === tab);
     return items
       .filter((i) => (!group || i.group === group) && matchesEdited(i, edited))
-      .sort((a, b) => (sort === "size" ? b.size - a.size : (b.age ?? -1) - (a.age ?? -1)));
+      .sort((a, b) =>
+        sort === "size"
+          ? b.reclaimable - a.reclaimable || b.size - a.size
+          : (b.age ?? -1) - (a.age ?? -1),
+      );
   }, [items, tab, sort, edited]);
 
-  const chosen = items.filter((i) => selected.has(i.path));
+  const chosen = items.filter((i) => selected.has(i.id));
+  const chosenFolders = totalFolders(chosen);
+  const chosenReclaimable = totalReclaimable(chosen);
+  const chosenShared = totalShared(chosen);
 
-  function toggle(path: string) {
+  function toggle(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (!next.delete(path)) next.add(path);
+      if (!next.delete(id)) next.add(id);
       return next;
     });
   }
 
   function toggleAll() {
-    const allOn = shown.length > 0 && shown.every((i) => selected.has(i.path));
+    const allOn = shown.length > 0 && shown.every((i) => selected.has(i.id));
     setSelected((prev) => {
       const next = new Set(prev);
-      shown.forEach((i) => (allOn ? next.delete(i.path) : next.add(i.path)));
+      shown.forEach((i) => (allOn ? next.delete(i.id) : next.add(i.id)));
       return next;
     });
   }
 
   function selectIdle() {
-    setSelected((prev) => new Set([...prev, ...items.filter(isIdle).map((i) => i.path)]));
+    setSelected((prev) => new Set([...prev, ...items.filter(isIdle).map((i) => i.id)]));
     setTab("all");
     setEdited({ kind: "older", days: IDLE_DAYS });
     setSort("age");
@@ -115,15 +137,16 @@ export default function App() {
   async function confirmDelete() {
     setDeleting(true);
     try {
-      const results = await deletePaths(
-        chosen.map((i) => i.path),
-        recycle,
-      );
+      const targetPaths = chosen.flatMap((i) => i.paths);
+      const results = await deletePaths(targetPaths, recycle);
       const done = new Set(results.filter((r) => !r.error).map((r) => r.path));
       const failed = results.filter((r) => r.error);
-      const freed = totalSize(chosen.filter((i) => done.has(i.path)));
-      setItems((prev) => prev.filter((i) => !done.has(i.path)));
-      setSelected(new Set(failed.map((r) => r.path)));
+      const failedSet = new Set(failed.map((r) => r.path));
+      const freed = candidates
+        .filter((c) => done.has(c.path))
+        .reduce((n, c) => n + Math.max(0, c.size - c.shared_size), 0);
+      setCandidates((prev) => prev.filter((c) => !done.has(c.path)));
+      setSelected(new Set(chosen.filter((i) => i.paths.some((p) => failedSet.has(p))).map((i) => i.id)));
       if (root) diskInfo(root).then(setDisk).catch(() => {});
       const doneMsg = recycle
         ? `Moved ${formatBytes(freed)} to the Recycle Bin`
@@ -182,6 +205,7 @@ export default function App() {
       <FolderList
         items={items}
         shown={shown}
+        root={root}
         tab={tab}
         sort={sort}
         edited={edited}
@@ -202,7 +226,7 @@ export default function App() {
         <div className="scrim" onClick={(e) => e.target === e.currentTarget && !deleting && setConfirming(false)}>
           <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
             <h2 id="confirm-title">
-              Delete {chosen.length} folder{chosen.length === 1 ? "" : "s"}?
+              Delete {chosenFolders} folder{chosenFolders === 1 ? "" : "s"}?
             </h2>
             <p>
               Your code stays untouched, and you can bring them back with {recreate.slice(0, 2).join(" or ")}
@@ -217,9 +241,15 @@ export default function App() {
               </button>
             </div>
             <div className="free">
-              <b className="num">{formatBytes(totalSize(chosen))}</b>
+              <b className="num">{formatBytes(chosenReclaimable)}</b>
               <span>{recycle ? "freed when you empty the Recycle Bin" : "freed right away, no undo"}</span>
             </div>
+            {chosenShared > 0 && (
+              <div className="shared-note">
+                + {formatBytes(chosenShared)} hardlinked in the pnpm store — run <code>pnpm store prune</code> after to
+                free it.
+              </div>
+            )}
             <div className="actions">
               <button className="btn" disabled={deleting} onClick={() => setConfirming(false)}>
                 Cancel

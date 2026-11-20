@@ -14,6 +14,8 @@ export type Kind =
 
 export type Candidate = {
   path: string;
+  /** Owning project directory (enclosing git repo or manifest root, else parent). */
+  project_root: string;
   kind: Kind;
   size: number;
   shared_size: number;

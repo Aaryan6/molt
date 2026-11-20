@@ -28,7 +28,7 @@ Nothing is deleted until you confirm. In the confirm dialog you choose whether f
 
 Use the **Edited** filter to see only projects you haven't touched in a week, a month, 3 months, 6 months or a year. To clear out everything older than a month, pick "Older than 1 month", tick the header checkbox and press Delete.
 
-For pnpm projects, the size shown is the full folder size. Most of those files are hardlinks to the pnpm store, so deleting frees less space until you run `pnpm store prune`.
+For pnpm projects, the size shown is the space freed right away, with any hardlinked pnpm store size called out separately (run `pnpm store prune` after deleting to free the store).
 
 ## Build
 

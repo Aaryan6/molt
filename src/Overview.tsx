@@ -1,5 +1,14 @@
 import type { DiskSpace } from "./api";
-import { formatBytes, GROUPS, isIdle, splitBytes, totalSize, type Item } from "./model";
+import {
+  formatBytes,
+  GROUPS,
+  isIdle,
+  splitBytes,
+  totalFolders,
+  totalReclaimable,
+  totalShared,
+  type Item,
+} from "./model";
 
 type Props = {
   items: Item[];
@@ -29,7 +38,7 @@ function BigNumber({ bytes }: { bytes: number }) {
 }
 
 function DiskCard({ items, disk, drive }: { items: Item[]; disk: DiskSpace | null; drive: string }) {
-  const dev = totalSize(items);
+  const dev = totalReclaimable(items);
   const used = disk ? disk.total - disk.free : 0;
   const other = Math.max(0, used - dev);
   return (
@@ -109,23 +118,37 @@ function Donut({ segments, total, size = 112, stroke = 12 }: {
 }
 
 function ReclaimCard({ items }: { items: Item[] }) {
-  const projects = new Set(items.map((i) => i.path.slice(0, i.path.length - i.folder.length))).size;
-  const byGroup = GROUPS.map((g) => ({ g, size: totalSize(items.filter((i) => i.group === g)) })).filter(
-    (x) => x.size > 0,
-  );
+  const projects = new Set(items.map((i) => i.projectRoot.toLowerCase())).size;
+  const folders = totalFolders(items);
+  const reclaimable = totalReclaimable(items);
+  const shared = totalShared(items);
+  const byGroup = GROUPS.map((g) => {
+    const groupItems = items.filter((i) => i.group === g);
+    return { g, size: totalReclaimable(groupItems), count: groupItems.length };
+  }).filter((x) => x.size > 0 || x.count > 0);
   return (
     <div className="card">
       <div className="card-h">
         <span>Reclaimable</span>
         <span className="tag">
-          {items.length} folders · {projects} projects
+          {folders} folders · {projects} projects
         </span>
       </div>
-      <BigNumber bytes={totalSize(items)} />
+      <BigNumber bytes={reclaimable} />
+      {shared > 0 && (
+        <div
+          className="sub"
+          title="Hardlinked to the pnpm store. Run `pnpm store prune` after deleting to free this space."
+        >
+          + {formatBytes(shared)} shared in pnpm store
+        </div>
+      )}
       <div className="segbar">
-        {byGroup.map(({ g, size }) => (
-          <i key={g.id} style={{ flexGrow: size, background: g.color }} title={`${g.label} ${formatBytes(size)}`} />
-        ))}
+        {byGroup
+          .filter((x) => x.size > 0)
+          .map(({ g, size }) => (
+            <i key={g.id} style={{ flexGrow: size, background: g.color }} title={`${g.label} ${formatBytes(size)}`} />
+          ))}
       </div>
       <div className="legend-g">
         {byGroup.map(({ g, size }) => (
@@ -151,7 +174,7 @@ function IdleCard({ items, onSelectIdle }: { items: Item[]; onSelectIdle: () => 
   const idle = items.filter(isIdle);
   const buckets = BUCKETS.map((b) => ({
     ...b,
-    size: totalSize(items.filter((i) => i.age !== null && b.test(i.age))),
+    size: totalReclaimable(items.filter((i) => i.age !== null && b.test(i.age))),
   }));
   const max = Math.max(1, ...buckets.map((b) => b.size));
   return (
@@ -162,7 +185,7 @@ function IdleCard({ items, onSelectIdle }: { items: Item[]; onSelectIdle: () => 
           Select
         </button>
       </div>
-      <BigNumber bytes={totalSize(idle)} />
+      <BigNumber bytes={totalReclaimable(idle)} />
       <div className="sub">idle for 30+ days</div>
       <div className="hist">
         {buckets.map((b) => (

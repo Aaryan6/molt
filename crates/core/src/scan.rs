@@ -10,6 +10,8 @@ use crate::rules::{self, Kind};
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     pub path: PathBuf,
+    /// Owning project directory (enclosing git repo or manifest root, else parent).
+    pub project_root: PathBuf,
     pub kind: Kind,
     /// Sum of file sizes in bytes (logical size).
     pub size: u64,
@@ -41,12 +43,13 @@ where
             if rules::protected_area(root).is_some() {
                 continue;
             }
-            s.spawn(move |s| walk(s, root.clone(), on_found));
+            let scan_root = root.as_path();
+            s.spawn(move |s| walk(s, root.clone(), scan_root, on_found));
         }
     });
 }
 
-fn walk<'a, F>(s: &rayon::Scope<'a>, dir: PathBuf, on_found: &'a F)
+fn walk<'a, F>(s: &rayon::Scope<'a>, dir: PathBuf, scan_root: &'a Path, on_found: &'a F)
 where
     F: Fn(Candidate) + Sync,
 {
@@ -67,7 +70,7 @@ where
         return;
     }
     if rules::is_venv(&names) {
-        spawn_size(s, dir, Kind::PythonVenv, on_found);
+        spawn_size(s, dir, scan_root, Kind::PythonVenv, on_found);
         return;
     }
 
@@ -76,29 +79,40 @@ where
             continue;
         }
         if let Some(kind) = rules::match_by_name(&name, &dir, &names) {
-            spawn_size(s, path, kind, on_found);
+            spawn_size(s, path, scan_root, kind, on_found);
         } else if rules::is_hidden_dir(&name) {
             // `.venv` is the one hidden folder worth taking.
             if rules::is_venv_dir(&path) {
-                spawn_size(s, path, Kind::PythonVenv, on_found);
+                spawn_size(s, path, scan_root, Kind::PythonVenv, on_found);
             }
         } else {
-            s.spawn(move |s| walk(s, path, on_found));
+            s.spawn(move |s| walk(s, path, scan_root, on_found));
         }
     }
 }
 
-fn spawn_size<'a, F>(s: &rayon::Scope<'a>, path: PathBuf, kind: Kind, on_found: &'a F)
-where
+fn spawn_size<'a, F>(
+    s: &rayon::Scope<'a>,
+    path: PathBuf,
+    scan_root: &'a Path,
+    kind: Kind,
+    on_found: &'a F,
+) where
     F: Fn(Candidate) + Sync,
 {
     s.spawn(move |_| {
         // Only pnpm node_modules hold hardlinks into the global store.
         let check_links = kind == Kind::NodeModules && path.join(".pnpm").is_dir();
         let stats = dir_stats(&path, check_links);
-        let last_active = project_last_active(&path);
+        // Empty folders free nothing and only add noise to the list.
+        if stats.size == 0 {
+            return;
+        }
+        let project_root = find_project_root(&path, scan_root, kind);
+        let last_active = project_last_active(&path, &project_root);
         on_found(Candidate {
             path,
+            project_root,
             kind,
             size: stats.size,
             shared_size: stats.shared,
@@ -170,36 +184,79 @@ fn link_count(path: &Path) -> u32 {
     fs::metadata(path).map(|m| m.nlink() as u32).unwrap_or(1)
 }
 
-/// Newest mtime among the project's own files (two levels deep, skipping
-/// generated folders and the candidate itself) plus `.git/index`.
-fn project_last_active(candidate: &Path) -> Option<u64> {
-    let project = candidate.parent()?;
+/// Locate the owning project directory for `candidate` without climbing above
+/// `scan_root`. Prefers the nearest ancestor containing `.git`; for
+/// `__pycache__` without git, falls back to the nearest ancestor with a Python
+/// project manifest (`pyproject.toml`, `setup.py`, `requirements.txt`).
+fn find_project_root(candidate: &Path, scan_root: &Path, kind: Kind) -> PathBuf {
+    let Some(parent) = candidate.parent() else {
+        return candidate.to_path_buf();
+    };
+    let mut chain = Vec::new();
+    let mut cur = Some(parent);
+    while let Some(dir) = cur {
+        if !dir.starts_with(scan_root) {
+            break;
+        }
+        chain.push(dir);
+        if dir == scan_root {
+            break;
+        }
+        cur = dir.parent();
+    }
+    if let Some(git_root) = chain.iter().find(|d| d.join(".git").exists()) {
+        return git_root.to_path_buf();
+    }
+    if kind == Kind::PyCache {
+        const PY_MARKERS: [&str; 3] = ["pyproject.toml", "setup.py", "requirements.txt"];
+        if let Some(py_root) = chain.iter().find(|&&d| {
+            (d != scan_root || d == parent) && PY_MARKERS.iter().any(|m| d.join(m).is_file())
+        }) {
+            return py_root.to_path_buf();
+        }
+    }
+    parent.to_path_buf()
+}
+
+/// Newest mtime among the owning project's own files (two levels deep, skipping
+/// generated folders and the candidate itself) plus `.git/index` and
+/// `.git/logs/HEAD` at the project root.
+fn project_last_active(candidate: &Path, project_root: &Path) -> Option<u64> {
     let mut newest = None;
     let mut note = |md: &fs::Metadata| {
         newest = newest.max(md.modified().ok().and_then(epoch_secs));
     };
 
-    if let Ok(md) = fs::metadata(project.join(".git").join("index")) {
-        note(&md);
+    let git = project_root.join(".git");
+    for rel in ["index", "HEAD", "logs/HEAD"] {
+        if let Ok(md) = fs::metadata(git.join(rel)) {
+            note(&md);
+        }
     }
-    for e in fs::read_dir(project).ok()?.flatten() {
+
+    if let Some(parent) = candidate.parent() {
+        scan_dir_mtimes(parent, candidate, 2, &mut note);
+        if project_root != parent {
+            scan_dir_mtimes(project_root, candidate, 2, &mut note);
+        }
+    }
+    newest
+}
+
+fn scan_dir_mtimes(dir: &Path, skip: &Path, depth: u8, note: &mut impl FnMut(&fs::Metadata)) {
+    let Ok(read) = fs::read_dir(dir) else { return };
+    for e in read.flatten() {
+        let path = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if e.path() == candidate || rules::is_generated_name(&name) || rules::is_venv_dir(&e.path()) {
+        if path == skip || rules::is_generated_name(&name) || rules::is_venv_dir(&path) {
             continue;
         }
         let Ok(md) = e.metadata() else { continue };
         note(&md);
-        if md.is_dir() && !is_link(&e.path()) {
-            if let Ok(inner) = fs::read_dir(e.path()) {
-                for i in inner.flatten() {
-                    if let Ok(imd) = i.metadata() {
-                        note(&imd);
-                    }
-                }
-            }
+        if depth > 1 && md.is_dir() && !rules::is_hidden_dir(&name) && !is_link(&path) {
+            scan_dir_mtimes(&path, skip, depth - 1, note);
         }
     }
-    newest
 }
 
 fn epoch_secs(t: SystemTime) -> Option<u64> {
@@ -223,4 +280,66 @@ pub(crate) fn is_link(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("molt-scan-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn skips_empty_folders_and_resolves_project_root() {
+        let root = tmp("project-root");
+
+        // Monorepo with .git at repo root, one non-empty and one empty node_modules.
+        let mono = root.join("my-mono");
+        fs::create_dir_all(mono.join(".git")).unwrap();
+        fs::write(mono.join(".git").join("index"), b"idx").unwrap();
+
+        let pkg_a = mono.join("packages").join("a");
+        fs::create_dir_all(pkg_a.join("node_modules")).unwrap();
+        fs::write(pkg_a.join("package.json"), b"{}").unwrap();
+        fs::write(pkg_a.join("node_modules").join("dep.js"), b"hello").unwrap();
+
+        let pkg_b = mono.join("packages").join("b");
+        fs::create_dir_all(pkg_b.join("node_modules")).unwrap();
+        fs::write(pkg_b.join("package.json"), b"{}").unwrap();
+
+        // Python project without .git, with nested __pycache__.
+        let py = root.join("py-app");
+        fs::create_dir_all(py.join("pkg").join("sub").join("__pycache__")).unwrap();
+        fs::write(py.join("pyproject.toml"), b"[project]").unwrap();
+        fs::write(py.join("pkg").join("sub").join("__pycache__").join("a.pyc"), b"1234").unwrap();
+
+        let found = Mutex::new(Vec::new());
+        // `std::env::temp_dir()` lives under `AppData` on Windows, which `scan`
+        // refuses as a protected area, so exercise `walk` directly here.
+        let on_found = |c| found.lock().unwrap().push(c);
+        rayon::scope(|s| {
+            let scan_root = root.as_path();
+            walk(s, root.clone(), scan_root, &on_found);
+        });
+        let found = found.into_inner().unwrap();
+
+        // Empty pkg_b/node_modules must be skipped.
+        assert_eq!(found.len(), 2);
+
+        let nm = found.iter().find(|c| c.kind == Kind::NodeModules).unwrap();
+        assert_eq!(nm.path, pkg_a.join("node_modules"));
+        assert_eq!(nm.project_root, mono);
+        assert!(nm.last_active.is_some());
+
+        let pyc = found.iter().find(|c| c.kind == Kind::PyCache).unwrap();
+        assert_eq!(pyc.path, py.join("pkg").join("sub").join("__pycache__"));
+        assert_eq!(pyc.project_root, py);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

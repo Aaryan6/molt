@@ -153,15 +153,29 @@ fn is_next_project(siblings: &[String]) -> bool {
     has_prefix("next.config.") && !has_prefix("remotion.config.")
 }
 
-/// True when `dir/.gitignore` has a plain entry for `name` (`name`, `/name`,
-/// `name/` or `/name/`).
+/// True when `dir/.gitignore` ignores `name` (plain entries like `name`,
+/// `/name`, `name/` or `/name/`), respecting comments and later `!name`
+/// negations.
 fn is_gitignored(dir: &Path, name: &str) -> bool {
     let Ok(text) = fs::read_to_string(dir.join(".gitignore")) else {
         return false;
     };
-    text.lines()
-        .map(|l| l.trim().trim_start_matches('/').trim_end_matches('/'))
-        .any(|l| l == name)
+    let mut ignored = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pat) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        let pat = pat.trim_start_matches('/').trim_end_matches('/');
+        if pat == name {
+            ignored = !negated;
+        }
+    }
+    ignored
 }
 
 /// True when `dir` is a Python venv on disk.
@@ -220,5 +234,15 @@ mod tests {
         fs::write(store.join("index.db"), b"").unwrap();
         assert_eq!(protected_area(&pkg.join("node_modules")).as_deref(), Some("the pnpm store"));
         let _ = fs::remove_dir_all(store.parent().unwrap());
+    }
+
+    #[test]
+    fn gitignore_respects_comments_and_negation() {
+        let dir = tmp("gitignore");
+        fs::write(dir.join(".gitignore"), "# dist\n/dist/\nbuild\n!build/\n").unwrap();
+        assert!(is_gitignored(&dir, "dist"));
+        assert!(!is_gitignored(&dir, "build"));
+        assert!(!is_gitignored(&dir, "out"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

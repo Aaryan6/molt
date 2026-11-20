@@ -8,7 +8,7 @@ import {
   formatBytes,
   matchesEdited,
   startOfDay,
-  totalSize,
+  totalReclaimable,
   type EditedFilter,
   type Item,
 } from "./model";
@@ -254,7 +254,7 @@ export default function EditedPicker({ items, value, onChange }: Props) {
           <div className="pop-foot">
             <span className="info">
               <b>{matching.length}</b> folder{matching.length === 1 ? "" : "s"} ·{" "}
-              <b className="num">{formatBytes(totalSize(matching))}</b>
+              <b className="num">{formatBytes(totalReclaimable(matching))}</b>
             </span>
             {on && (
               <button className="btn sm ghost" onClick={() => pickPreset(ANY_TIME)}>
