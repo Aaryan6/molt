@@ -4,12 +4,15 @@ import { deletePaths, diskInfo, scan, type Candidate, type DiskSpace } from "./a
 import FolderList, { type Sort } from "./FolderList";
 import {
   ANY_TIME,
+  bulkPickable,
   buildItems,
   formatBytes,
   GROUPS,
   IDLE_DAYS,
   isIdle,
+  isRecent,
   matchesEdited,
+  recreateFor,
   totalFolders,
   totalReclaimable,
   totalShared,
@@ -114,10 +117,11 @@ export default function App() {
   }
 
   function toggleAll() {
-    const allOn = shown.length > 0 && shown.every((i) => selected.has(i.id));
+    const pickable = bulkPickable(shown, edited);
+    const allOn = pickable.length > 0 && pickable.every((i) => selected.has(i.id));
     setSelected((prev) => {
       const next = new Set(prev);
-      shown.forEach((i) => (allOn ? next.delete(i.id) : next.add(i.id)));
+      pickable.forEach((i) => (allOn ? next.delete(i.id) : next.add(i.id)));
       return next;
     });
   }
@@ -174,7 +178,8 @@ export default function App() {
   }, [confirming, deleting]);
 
   const drive = root?.match(/^[A-Za-z]:/)?.[0] ?? "";
-  const recreate = [...new Set(chosen.map((i) => i.group.recreate))];
+  const recreate = [...new Set(chosen.map((i) => recreateFor(i.kind)))];
+  const chosenRecent = chosen.filter(isRecent).length;
 
   return (
     <div className="app">
@@ -244,6 +249,12 @@ export default function App() {
               <b className="num">{formatBytes(chosenReclaimable)}</b>
               <span>{recycle ? "freed when you empty the Recycle Bin" : "freed right away, no undo"}</span>
             </div>
+            {chosenRecent > 0 && (
+              <div className="shared-note">
+                {chosenRecent === chosen.length ? "These are" : `${chosenRecent} of these are`} in projects edited this
+                week. Stop any dev server running there first; Molt skips folders a program is using.
+              </div>
+            )}
             {chosenShared > 0 && (
               <div className="shared-note">
                 + {formatBytes(chosenShared)} hardlinked in the pnpm store — run <code>pnpm store prune</code> after to

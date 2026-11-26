@@ -17,6 +17,38 @@ pub enum Kind {
     PythonVenv,
     PyCache,
     RustTarget,
+    /// `.svelte-kit`
+    SvelteKit,
+    /// `.angular`
+    Angular,
+    /// `.astro`
+    Astro,
+    /// Nuxt / Nitro `.output`
+    NuxtOutput,
+    /// `.parcel-cache`
+    ParcelCache,
+    /// `.expo`
+    Expo,
+    /// Test coverage reports.
+    Coverage,
+    /// `.pytest_cache`, `.mypy_cache`, `.ruff_cache`
+    PyToolCache,
+    /// `.tox`, `.nox`
+    Tox,
+    /// Maven `target`
+    MavenTarget,
+    /// Gradle `build` and `.gradle`
+    Gradle,
+    /// .NET `bin` and `obj`
+    DotnetBuild,
+    /// Flutter / Dart `.dart_tool` and `build`
+    Dart,
+    /// Zig `.zig-cache`, `zig-cache` and `zig-out`
+    Zig,
+    /// PHP Composer `vendor`
+    Vendor,
+    /// Any folder marked with a `CACHEDIR.TAG`.
+    Cache,
 }
 
 impl Kind {
@@ -32,9 +64,34 @@ impl Kind {
             Kind::PythonVenv => "python venv",
             Kind::PyCache => "__pycache__",
             Kind::RustTarget => "rust target",
+            Kind::SvelteKit => ".svelte-kit",
+            Kind::Angular => ".angular",
+            Kind::Astro => ".astro",
+            Kind::NuxtOutput => ".output",
+            Kind::ParcelCache => ".parcel-cache",
+            Kind::Expo => ".expo",
+            Kind::Coverage => "coverage",
+            Kind::PyToolCache => "python cache",
+            Kind::Tox => "tox env",
+            Kind::MavenTarget => "maven target",
+            Kind::Gradle => "gradle build",
+            Kind::DotnetBuild => ".net build",
+            Kind::Dart => "dart build",
+            Kind::Zig => "zig build",
+            Kind::Vendor => "composer vendor",
+            Kind::Cache => "tagged cache",
         }
     }
 }
+
+/// Every folder name `match_by_name` can take, plus `.git`. Used to tell a
+/// project's own files from generated ones when judging when it was last edited.
+const GENERATED_NAMES: [&str; 30] = [
+    "node_modules", ".next", ".nuxt", ".turbo", "dist", "build", "out", "target", "__pycache__",
+    ".svelte-kit", ".angular", ".astro", ".output", ".parcel-cache", ".expo", "coverage",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".gradle", "bin", "obj",
+    ".dart_tool", ".zig-cache", "zig-cache", "zig-out", "vendor", ".git",
+];
 
 /// Folders that are never worth descending into. Installed apps keep their own
 /// `node_modules` under these, and deleting those would break the apps.
@@ -115,35 +172,86 @@ fn file_name(p: &Path) -> String {
 
 /// Folder names that are always regenerated, used to judge project activity.
 pub fn is_generated_name(name: &str) -> bool {
-    matches!(
-        name,
-        "node_modules" | ".next" | ".nuxt" | ".turbo" | "dist" | "build" | "out" | "target"
-            | "__pycache__" | ".git"
-    )
+    GENERATED_NAMES.contains(&name)
 }
 
 /// A folder named `name` inside `dir` (whose entries are `siblings`) is a
 /// target when the marker file proving it belongs to a real project is present.
 pub fn match_by_name(name: &str, dir: &Path, siblings: &[String]) -> Option<Kind> {
     let has = |f: &str| siblings.iter().any(|s| s.eq_ignore_ascii_case(f));
+    let has_ext = |exts: &[&str]| {
+        siblings.iter().any(|s| {
+            let s = s.to_ascii_lowercase();
+            exts.iter().any(|e| s.len() > e.len() && s.ends_with(e))
+        })
+    };
+    let has_prefix = |p: &str| siblings.iter().any(|s| s.to_ascii_lowercase().starts_with(p));
     let js = has("package.json");
+    let python = has("pyproject.toml") || has("setup.py") || has("setup.cfg") || has("requirements.txt");
+    let gradle = has("build.gradle") || has("build.gradle.kts") || has("settings.gradle") || has("settings.gradle.kts");
+    let dart = has("pubspec.yaml");
+    let dotnet = has_ext(&[".csproj", ".fsproj", ".vbproj"]);
+    let zig = has("build.zig");
     match name {
         "node_modules" if js => Some(Kind::NodeModules),
         ".next" if js => Some(Kind::Next),
         ".nuxt" if js => Some(Kind::Nuxt),
         ".turbo" if js => Some(Kind::Turbo),
+        ".svelte-kit" if js => Some(Kind::SvelteKit),
+        ".angular" if js => Some(Kind::Angular),
+        ".astro" if js => Some(Kind::Astro),
+        ".parcel-cache" if js => Some(Kind::ParcelCache),
+        ".expo" if js => Some(Kind::Expo),
+        // `.output` is Nuxt and Nitro's build. Other tools use the name for
+        // results worth keeping, so ask for a Nuxt config or the .gitignore.
+        ".output" if js && (has_prefix("nuxt.config.") || is_gitignored(dir, name)) => Some(Kind::NuxtOutput),
         // `dist`, `build` and `out` are common names for real source folders
         // too (Electron keeps icons in `build/`), so only take them when the
         // project's .gitignore says they are generated.
         "dist" if js && is_gitignored(dir, name) => Some(Kind::Dist),
         "build" if js && is_gitignored(dir, name) => Some(Kind::Build),
+        // Gradle and Flutter always write their output to `build/`.
+        "build" if gradle => Some(Kind::Gradle),
+        "build" if dart => Some(Kind::Dart),
         // `out` is only Next.js's static export. Other tools (Remotion, for
         // one) render final videos into `out/`, which are not cheap to redo.
         "out" if is_next_project(siblings) && is_gitignored(dir, name) => Some(Kind::Out),
+        "coverage" if (js || python) && is_gitignored(dir, name) => Some(Kind::Coverage),
         "target" if has("Cargo.toml") => Some(Kind::RustTarget),
+        "target" if has("pom.xml") => Some(Kind::MavenTarget),
+        ".gradle" if gradle => Some(Kind::Gradle),
+        // .NET writes `obj` on every build. `bin` is also a common name for
+        // checked-in scripts, so take it only once a build has made `obj`.
+        "obj" if dotnet => Some(Kind::DotnetBuild),
+        "bin" if dotnet && has("obj") => Some(Kind::DotnetBuild),
+        ".dart_tool" if dart => Some(Kind::Dart),
+        ".zig-cache" | "zig-cache" | "zig-out" if zig => Some(Kind::Zig),
+        "vendor" if has("composer.json") => Some(Kind::Vendor),
         "__pycache__" => Some(Kind::PyCache),
+        ".pytest_cache" | ".mypy_cache" | ".ruff_cache" => Some(Kind::PyToolCache),
+        ".tox" if has("tox.ini") || python => Some(Kind::Tox),
+        ".nox" if has("noxfile.py") => Some(Kind::Tox),
         _ => None,
     }
+}
+
+/// The signature a `CACHEDIR.TAG` must start with (https://bford.info/cachedir/).
+const CACHEDIR_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// True when `dir` holds a valid `CACHEDIR.TAG`, the standard way for a tool
+/// to mark a folder as a cache that can be deleted and rebuilt.
+pub fn has_cachedir_tag(dir: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = fs::File::open(dir.join("CACHEDIR.TAG")) else {
+        return false;
+    };
+    let mut head = [0u8; CACHEDIR_SIGNATURE.len()];
+    file.read_exact(&mut head).is_ok() && head == CACHEDIR_SIGNATURE
+}
+
+/// Whether a folder's entries include a file called `CACHEDIR.TAG`.
+pub fn lists_cachedir_tag(entries: &[String]) -> bool {
+    entries.iter().any(|e| e.eq_ignore_ascii_case("CACHEDIR.TAG"))
 }
 
 /// A Next.js project that is not also a Remotion project (Remotion's Next
@@ -202,7 +310,6 @@ mod tests {
 
     #[test]
     fn pnpm_store_versions_are_stores() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(is_package_store(&names(&["files", "index"])));
         assert!(is_package_store(&names(&["files", "index.db", "links", "projects"])));
         assert!(!is_package_store(&names(&["files", "src", "package.json"])));
@@ -234,6 +341,49 @@ mod tests {
         fs::write(store.join("index.db"), b"").unwrap();
         assert_eq!(protected_area(&pkg.join("node_modules")).as_deref(), Some("the pnpm store"));
         let _ = fs::remove_dir_all(store.parent().unwrap());
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn new_kinds_need_their_marker() {
+        let dir = tmp("kinds");
+        let m = |name: &str, sib: &[&str]| match_by_name(name, &dir, &names(sib));
+        assert_eq!(m(".svelte-kit", &["package.json"]), Some(Kind::SvelteKit));
+        assert_eq!(m(".svelte-kit", &["README.md"]), None);
+        assert_eq!(m("target", &["pom.xml"]), Some(Kind::MavenTarget));
+        assert_eq!(m("target", &["Cargo.toml", "pom.xml"]), Some(Kind::RustTarget));
+        assert_eq!(m("build", &["build.gradle.kts"]), Some(Kind::Gradle));
+        assert_eq!(m("build", &["pubspec.yaml"]), Some(Kind::Dart));
+        assert_eq!(m("build", &["package.json"]), None);
+        assert_eq!(m("obj", &["App.csproj"]), Some(Kind::DotnetBuild));
+        assert_eq!(m("bin", &["App.csproj"]), None);
+        assert_eq!(m("bin", &["App.csproj", "obj"]), Some(Kind::DotnetBuild));
+        assert_eq!(m("bin", &["package.json"]), None);
+        assert_eq!(m("vendor", &["composer.json"]), Some(Kind::Vendor));
+        assert_eq!(m("vendor", &["go.mod"]), None);
+        assert_eq!(m(".pytest_cache", &[]), Some(Kind::PyToolCache));
+        assert_eq!(m(".tox", &["tox.ini"]), Some(Kind::Tox));
+        assert_eq!(m("zig-out", &["build.zig"]), Some(Kind::Zig));
+        assert_eq!(m(".output", &["package.json", "nuxt.config.ts"]), Some(Kind::NuxtOutput));
+        assert_eq!(m(".output", &["package.json"]), None);
+        assert_eq!(m("coverage", &["package.json"]), None);
+        fs::write(dir.join(".gitignore"), "coverage/\n").unwrap();
+        assert_eq!(m("coverage", &["package.json"]), Some(Kind::Coverage));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cachedir_tag_needs_the_signature() {
+        let dir = tmp("cachedir");
+        assert!(!has_cachedir_tag(&dir));
+        fs::write(dir.join("CACHEDIR.TAG"), "not a tag").unwrap();
+        assert!(!has_cachedir_tag(&dir));
+        fs::write(dir.join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n# made by a tool\n").unwrap();
+        assert!(has_cachedir_tag(&dir));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

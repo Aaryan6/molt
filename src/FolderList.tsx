@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import EditedPicker from "./EditedPicker";
 import {
   ANY_TIME,
+  bulkPickable,
   formatAge,
   formatBytes,
   GROUPS,
   isIdle,
+  isRecent,
   matchesEdited,
   splitDisplayPath,
   totalFolders,
@@ -54,6 +56,9 @@ export default function FolderList(p: Props) {
 
   const max = Math.max(1, ...p.items.map((i) => i.reclaimable));
   const nSel = p.shown.filter((i) => p.selected.has(i.id)).length;
+  const pickable = bulkPickable(p.shown, p.edited);
+  const allOn = pickable.length > 0 && pickable.every((i) => p.selected.has(i.id));
+  const leftRecent = p.edited.kind === "any" ? p.shown.filter((i) => isRecent(i) && !p.selected.has(i.id)).length : 0;
   const chosen = p.items.filter((i) => p.selected.has(i.id));
   const hiddenSel = chosen.length - nSel;
   const chosenFolders = totalFolders(chosen);
@@ -62,8 +67,8 @@ export default function FolderList(p: Props) {
 
   const allRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (allRef.current) allRef.current.indeterminate = nSel > 0 && nSel < p.shown.length;
-  }, [nSel, p.shown.length]);
+    if (allRef.current) allRef.current.indeterminate = nSel > 0 && !allOn;
+  }, [nSel, allOn]);
 
   return (
     <section className="list-card">
@@ -94,7 +99,9 @@ export default function FolderList(p: Props) {
           ref={allRef}
           type="checkbox"
           aria-label="Select all"
-          checked={p.shown.length > 0 && nSel === p.shown.length}
+          title="Selects everything shown except projects edited this week"
+          checked={allOn}
+          disabled={pickable.length === 0}
           onChange={p.onToggleAll}
         />
         <span>Folder</span>
@@ -188,6 +195,12 @@ export default function FolderList(p: Props) {
               <b className="num">{formatBytes(chosenReclaimable)}</b> to free
               {chosenShared > 0 && <span className="hidden-note"> · +{formatBytes(chosenShared)} pnpm</span>}
               {hiddenSel > 0 && <span className="hidden-note"> · {hiddenSel} hidden by filters</span>}
+              {leftRecent > 0 && (
+                <span className="hidden-note" title="Projects edited this week are never ticked in bulk">
+                  {" "}
+                  · {leftRecent} edited this week not ticked
+                </span>
+              )}
             </>
           ) : (
             "Pick folders to free up space"

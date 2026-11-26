@@ -2,6 +2,7 @@
 
 mod clean;
 mod disk;
+mod guard;
 mod rules;
 mod scan;
 

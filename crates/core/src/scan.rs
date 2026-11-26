@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::guard;
 use crate::rules::{self, Kind};
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +74,12 @@ where
         spawn_size(s, dir, scan_root, Kind::PythonVenv, on_found);
         return;
     }
+    // A tool marked this folder as a disposable cache. The scan root itself is
+    // never offered: the user picked it as the place their projects live.
+    if dir != scan_root && rules::lists_cachedir_tag(&names) && rules::has_cachedir_tag(&dir) {
+        spawn_size(s, dir, scan_root, Kind::Cache, on_found);
+        return;
+    }
 
     for (name, path) in subdirs {
         if rules::is_skipped_dir(&name) || rules::is_package_manager_dir(&dir, &name) {
@@ -81,9 +88,12 @@ where
         if let Some(kind) = rules::match_by_name(&name, &dir, &names) {
             spawn_size(s, path, scan_root, kind, on_found);
         } else if rules::is_hidden_dir(&name) {
-            // `.venv` is the one hidden folder worth taking.
+            // Hidden folders are only taken when they say what they are:
+            // a venv (`.venv`) or a tagged cache.
             if rules::is_venv_dir(&path) {
                 spawn_size(s, path, scan_root, Kind::PythonVenv, on_found);
+            } else if rules::has_cachedir_tag(&path) {
+                spawn_size(s, path, scan_root, Kind::Cache, on_found);
             }
         } else {
             s.spawn(move |s| walk(s, path, scan_root, on_found));
@@ -108,6 +118,12 @@ fn spawn_size<'a, F>(
         if stats.size == 0 {
             return;
         }
+        // Another repository inside may hold work that exists nowhere else,
+        // and a folder Git tracks was committed on purpose. Leave both out;
+        // the same checks run again before anything is deleted.
+        if stats.nested_repo || guard::git_tracked(&path) == guard::GitCheck::Tracked {
+            return;
+        }
         let project_root = find_project_root(&path, scan_root, kind);
         let last_active = project_last_active(&path, &project_root);
         on_found(Candidate {
@@ -125,6 +141,8 @@ fn spawn_size<'a, F>(
 struct Stats {
     size: u64,
     shared: u64,
+    /// A `.git` was found somewhere inside.
+    nested_repo: bool,
 }
 
 fn dir_stats(dir: &Path, check_links: bool) -> Stats {
@@ -135,6 +153,9 @@ fn dir_stats(dir: &Path, check_links: bool) -> Stats {
     entries
         .par_iter()
         .map(|e| {
+            if e.file_name().eq_ignore_ascii_case(".git") {
+                return Stats { nested_repo: true, ..Default::default() };
+            }
             let Ok(ft) = e.file_type() else { return Stats::default() };
             if ft.is_dir() {
                 if is_link(&e.path()) {
@@ -145,7 +166,7 @@ fn dir_stats(dir: &Path, check_links: bool) -> Stats {
             } else if let Ok(md) = e.metadata() {
                 let len = md.len();
                 let shared = if check_links && link_count(&e.path()) > 1 { len } else { 0 };
-                Stats { size: len, shared }
+                Stats { size: len, shared, nested_repo: false }
             } else {
                 Stats::default()
             }
@@ -153,6 +174,7 @@ fn dir_stats(dir: &Path, check_links: bool) -> Stats {
         .reduce(Stats::default, |a, b| Stats {
             size: a.size + b.size,
             shared: a.shared + b.shared,
+            nested_repo: a.nested_repo || b.nested_repo,
         })
 }
 
@@ -340,6 +362,37 @@ mod tests {
         assert_eq!(pyc.path, py.join("pkg").join("sub").join("__pycache__"));
         assert_eq!(pyc.project_root, py);
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finds_tagged_caches_and_skips_nested_repos() {
+        let root = tmp("tags");
+        let tag = "Signature: 8a477f597d28d172789f06886806bc55
+";
+
+        // A tagged cache in a plain folder and one hidden folder.
+        let cache = root.join("tool-cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("CACHEDIR.TAG"), tag).unwrap();
+        fs::write(cache.join("blob"), b"data").unwrap();
+        let hidden = root.join("app").join(".hidden-cache");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("CACHEDIR.TAG"), tag).unwrap();
+        fs::write(hidden.join("blob"), b"data").unwrap();
+
+        // A venv holding a package checked out from Git (`pip install -e git+...`).
+        let venv = root.join("py").join(".venv");
+        fs::create_dir_all(venv.join("src").join("dep").join(".git")).unwrap();
+        fs::write(venv.join("pyvenv.cfg"), b"home = x").unwrap();
+        fs::write(venv.join("src").join("dep").join("mod.py"), b"x = 1").unwrap();
+
+        let found = Mutex::new(Vec::new());
+        let on_found = |c| found.lock().unwrap().push(c);
+        rayon::scope(|s| walk(s, root.clone(), root.as_path(), &on_found));
+        let mut paths: Vec<_> = found.into_inner().unwrap().into_iter().map(|c: Candidate| (c.kind, c.path)).collect();
+        paths.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(paths, vec![(Kind::Cache, hidden), (Kind::Cache, cache)]);
         let _ = fs::remove_dir_all(&root);
     }
 }

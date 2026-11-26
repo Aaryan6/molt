@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "molt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "molt-core",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "molt-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "molt-core",
  "serde",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "molt-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "serde",

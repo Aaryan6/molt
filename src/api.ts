@@ -10,7 +10,23 @@ export type Kind =
   | "out"
   | "python-venv"
   | "py-cache"
-  | "rust-target";
+  | "rust-target"
+  | "svelte-kit"
+  | "angular"
+  | "astro"
+  | "nuxt-output"
+  | "parcel-cache"
+  | "expo"
+  | "coverage"
+  | "py-tool-cache"
+  | "tox"
+  | "maven-target"
+  | "gradle"
+  | "dotnet-build"
+  | "dart"
+  | "zig"
+  | "vendor"
+  | "cache";
 
 export type Candidate = {
   path: string;

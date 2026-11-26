@@ -12,18 +12,60 @@ export type Group = {
 };
 
 export const GROUPS: Group[] = [
-  { id: "deps", label: "node_modules", kinds: ["node-modules"], color: "var(--k-deps)", recreate: "npm install" },
+  { id: "deps", label: "Dependencies", kinds: ["node-modules", "vendor"], color: "var(--k-deps)", recreate: "npm install" },
   { id: "next", label: ".next", kinds: ["next"], color: "var(--k-next)", recreate: "a rebuild" },
   { id: "rust", label: "Rust target", kinds: ["rust-target"], color: "var(--k-rust)", recreate: "cargo build" },
-  { id: "py", label: "Python", kinds: ["python-venv", "py-cache"], color: "var(--k-py)", recreate: "pip install" },
+  {
+    id: "py",
+    label: "Python",
+    kinds: ["python-venv", "py-cache", "py-tool-cache", "tox"],
+    color: "var(--k-py)",
+    recreate: "pip install",
+  },
   {
     id: "build",
     label: "Builds",
-    kinds: ["dist", "build", "out", "turbo", "nuxt"],
+    kinds: [
+      "dist",
+      "build",
+      "out",
+      "turbo",
+      "nuxt",
+      "nuxt-output",
+      "svelte-kit",
+      "angular",
+      "astro",
+      "parcel-cache",
+      "expo",
+      "coverage",
+      "maven-target",
+      "gradle",
+      "dotnet-build",
+      "dart",
+      "zig",
+      "cache",
+    ],
     color: "var(--k-build)",
     recreate: "a rebuild",
   },
 ];
+
+/** How to get a folder of each kind back, where it differs from its group's. */
+const RECREATE: Partial<Record<Kind, string>> = {
+  vendor: "composer install",
+  "py-cache": "running the code",
+  "py-tool-cache": "running your tools",
+  tox: "tox",
+  coverage: "running your tests",
+  "maven-target": "mvn package",
+  gradle: "gradle build",
+  "dotnet-build": "dotnet build",
+  dart: "flutter pub get",
+  zig: "zig build",
+  cache: "the tool that made them",
+};
+
+export const recreateFor = (kind: Kind) => RECREATE[kind] ?? groupFor(kind).recreate;
 
 export type Item = {
   /** Stable row key (folder path, or `pycache:<project_root>` when grouped). */
@@ -181,6 +223,19 @@ export function splitDisplayPath(fullPath: string, root: string | null): { prefi
 }
 
 export const isIdle = (i: Item) => i.age !== null && i.age >= IDLE_DAYS;
+
+export const RECENT_DAYS = 7;
+
+/** Edited in the last week, or Molt couldn't tell when. */
+export const isRecent = (i: Item) => i.age === null || i.age < RECENT_DAYS;
+
+/**
+ * Rows the header checkbox ticks. With no Edited filter, folders in projects
+ * edited this week are left out, so a project being worked on is never
+ * cleaned by accident; tick them one by one, or filter by date first.
+ */
+export const bulkPickable = (shown: Item[], f: EditedFilter) =>
+  f.kind === "any" ? shown.filter((i) => !isRecent(i)) : shown;
 
 /**
  * "Edited" filter on when a project was last touched: anything, untouched
